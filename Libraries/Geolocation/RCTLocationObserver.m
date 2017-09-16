@@ -12,6 +12,7 @@
 #import <CoreLocation/CLError.h>
 #import <CoreLocation/CLLocationManager.h>
 #import <CoreLocation/CLLocationManagerDelegate.h>
+#import <CoreLocation/CLHeading.h>
 
 #import <React/RCTAssert.h>
 #import <React/RCTBridge.h>
@@ -105,7 +106,7 @@ static NSDictionary<NSString *, id> *RCTPositionError(RCTPositionErrorCode code,
 @implementation RCTLocationObserver
 {
   CLLocationManager *_locationManager;
-  NSDictionary<NSString *, id> *_lastLocationEvent;
+  NSMutableDictionary<NSString *, id> *_lastLocationEvent;
   NSMutableArray<RCTLocationRequest *> *_pendingRequests;
   BOOL _observingLocation;
   RCTLocationOptions _observerOptions;
@@ -118,6 +119,7 @@ RCT_EXPORT_MODULE()
 - (void)dealloc
 {
   [_locationManager stopUpdatingLocation];
+  [_locationManager stopUpdatingHeading];
   _locationManager.delegate = nil;
 }
 
@@ -128,7 +130,7 @@ RCT_EXPORT_MODULE()
 
 - (NSArray<NSString *> *)supportedEvents
 {
-  return @[@"geolocationDidChange", @"geolocationError"];
+  return @[@"geolocationDidChange", @"geolocationError",@"headingDidChange"];
 }
 
 #pragma mark - Private API
@@ -136,11 +138,28 @@ RCT_EXPORT_MODULE()
 - (void)beginLocationUpdatesWithDesiredAccuracy:(CLLocationAccuracy)desiredAccuracy distanceFilter:(CLLocationDistance)distanceFilter
 {
   [self requestAuthorization];
-
+  _lastLocationEvent = [NSMutableDictionary dictionaryWithCapacity:2];
+  
+  
+  NSMutableDictionary<NSString *, id> *coords = [[NSMutableDictionary alloc] initWithCapacity:7];
+  coords[@"latitude"] = NULL;
+  coords[@"longitude"] = NULL;
+  coords[@"altitude"] = NULL;
+  coords[@"accuracy"] = NULL;
+  coords[@"altitudeAccuracy"] = NULL;
+  coords[@"heading"] = NULL;
+  coords[@"speed"] = NULL;
+  
+  _lastLocationEvent[@"coords"] = [NSMutableDictionary dictionaryWithDictionary:coords];
+  _lastLocationEvent[@"timestamp"] = NULL;
+  
+  
+  
   _locationManager.distanceFilter  = distanceFilter;
-  _locationManager.desiredAccuracy = desiredAccuracy;
+  _locationManager.desiredAccuracy = 5; // ROSKAM
   // Start observing location
   [_locationManager startUpdatingLocation];
+  [_locationManager startUpdatingHeading];
 }
 
 #pragma mark - Timeout handler
@@ -155,6 +174,7 @@ RCT_EXPORT_MODULE()
   // Stop updating if no pending requests
   if (_pendingRequests.count == 0 && !_observingLocation) {
     [_locationManager stopUpdatingLocation];
+    [_locationManager stopUpdatingHeading];
   }
 }
 
@@ -279,18 +299,20 @@ RCT_EXPORT_METHOD(getCurrentPosition:(RCTLocationOptions)options
 {
   // Create event
   CLLocation *location = locations.lastObject;
-  _lastLocationEvent = @{
-    @"coords": @{
-      @"latitude": @(location.coordinate.latitude),
-      @"longitude": @(location.coordinate.longitude),
-      @"altitude": @(location.altitude),
-      @"accuracy": @(location.horizontalAccuracy),
-      @"altitudeAccuracy": @(location.verticalAccuracy),
-      @"heading": @(location.course),
-      @"speed": @(location.speed),
-    },
-    @"timestamp": @([location.timestamp timeIntervalSince1970] * 1000) // in ms
-  };
+  
+  _lastLocationEvent[@"coords"][@"latitude"] = @(location.coordinate.latitude);
+  _lastLocationEvent[@"coords"][@"longitude"] = @(location.coordinate.longitude);
+  _lastLocationEvent[@"coords"][@"altitude"] = @(location.altitude);
+  _lastLocationEvent[@"coords"][@"accuracy"] = @(location.horizontalAccuracy);
+  _lastLocationEvent[@"coords"][@"altitudeAccuracy"] = @(location.verticalAccuracy);
+  _lastLocationEvent[@"coords"][@"speed"] = @(location.coordinate.latitude);
+  
+  if (_lastLocationEvent[@"coords"][@"heading"] == NULL) {
+    _lastLocationEvent[@"coords"][@"heading"] = [NSNumber numberWithFloat:0];
+  }
+  
+  _lastLocationEvent[@"timestamp"] = @([location.timestamp timeIntervalSince1970] * 1000);
+  
 
   // Send event
   if (_observingLocation) {
@@ -307,12 +329,23 @@ RCT_EXPORT_METHOD(getCurrentPosition:(RCTLocationOptions)options
   // Stop updating if not observing
   if (!_observingLocation) {
     [_locationManager stopUpdatingLocation];
+    [_locationManager stopUpdatingHeading];
   }
 
   // Reset location accuracy if desiredAccuracy is changed.
   // Otherwise update accuracy will force triggering didUpdateLocations, watchPosition would keeping receiving location updates, even there's no location changes.
   if (ABS(_locationManager.desiredAccuracy - RCT_DEFAULT_LOCATION_ACCURACY) > 0.000001) {
     _locationManager.desiredAccuracy = RCT_DEFAULT_LOCATION_ACCURACY;
+  }
+}
+
+- (void)locationManager:(CLLocationManager *)manager didUpdateHeading:(CLHeading *)newHeading
+{
+  _lastLocationEvent[@"coords"][@"heading"] = [NSNumber numberWithFloat:newHeading.trueHeading];
+
+  // Send event
+  if (_observingLocation) {
+    [self sendEventWithName:@"geolocationDidChange" body:_lastLocationEvent];
   }
 }
 
